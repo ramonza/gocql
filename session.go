@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/gocql/gocql/internal/lru"
+	"go.opencensus.io/trace"
 )
 
 // Session is the interface used by users to interact with the database.
@@ -389,14 +390,31 @@ func (s *Session) executeQuery(qry *Query) *Iter {
 		return &Iter{err: ErrSessionClosed}
 	}
 
-	iter, err := s.executor.executeQuery(qry)
+	oldCtx := qry.context
+	_ = qry.WithContext(trace.StartSpan(qry.context, "cassandra.apache.org/cql-client/execute-query"))
+	defer func() {
+		trace.EndSpan(qry.context)
+		_ = qry.WithContext(oldCtx)
+	}()
+
+	iter, err := s.executor.executeQuery(qry.context, qry)
+
+	trace.SetSpanAttributes(qry.context,
+		trace.StringAttribute{"keyspace", qry.Keyspace()},
+		trace.StringAttribute{"query", qry.stmt},
+		trace.StringAttribute{"consistency_level", qry.cons.String()},
+		trace.Int64Attribute{"attempts", int64(qry.Attempts())},
+		trace.Int64Attribute{"total_latency", qry.totalLatency})
+
 	if err != nil {
+		trace.SetSpanStatus(qry.context, trace.Status{2, err.Error()})
 		return &Iter{err: err}
 	}
 	if iter == nil {
 		panic("nil iter")
 	}
 
+	trace.SetSpanStatus(qry.context, trace.Status{})
 	return iter
 }
 
